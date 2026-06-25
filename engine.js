@@ -81,8 +81,13 @@ function buildFilterUI(filter) {
     group.querySelector(`#input-${param.id}`).addEventListener('input', (e) => { 
       param.currentValue = parseFloat(e.target.value); 
       group.querySelector(`#val-${param.id}`).textContent = param.currentValue.toFixed(2); 
+      if (param.id === 'u_charSet') handleCharsetModeChange(param.currentValue);
     });
+    if (param.id === 'u_charSet') handleCharsetModeChange(param.currentValue);
   });
+  if (!filter.params.some(p => p.id === 'u_charSet')) {
+    document.getElementById('word-input-container').style.display = 'none';
+  }
 }
 buildFilterUI(FILTERS[0]);
 
@@ -90,6 +95,61 @@ buildFilterUI(FILTERS[0]);
 // WEBGL INITIALIZATION
 // ─────────────────────────────────────────────────────────────────────
 let fontTexture = null; // Add this near the top of engine.js with the other let variables
+let currentCharCount = 12;
+
+// ASCII charset presets — Classic/Detailed are fixed density ramps, "word" mode is built live from user input
+const CHARSETS = {
+  classic:  " .':-~+=*#%@",
+  detailed: " .'`^,:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"
+};
+let currentCharSet = CHARSETS.classic;
+
+// Rebuilds the font atlas texture for the given charset/word. Safe to call before WebGL exists —
+// it just records the choice in currentCharSet and applies it for real once initWebGL() runs.
+function buildFontAtlas(charSet) {
+  currentCharSet = charSet;
+  currentCharCount = charSet.length;
+  if (!gl) return;
+
+  const atlasCanvas = document.createElement('canvas');
+  const ctx = atlasCanvas.getContext('2d');
+  atlasCanvas.width = charSet.length * 64;
+  atlasCanvas.height = 64;
+
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, atlasCanvas.width, atlasCanvas.height);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 48px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < charSet.length; i++) {
+    ctx.fillText(charSet[i], i * 64 + 32, 32);
+  }
+
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, fontTexture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlasCanvas);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.activeTexture(gl.TEXTURE0);
+}
+
+// Driven by the ASCII filter's "Charset" slider: 0 = Classic, 1 = Detailed, 2 = Word
+function handleCharsetModeChange(mode) {
+  const wordContainer = document.getElementById('word-input-container');
+  if (mode === 2) {
+    wordContainer.style.display = 'block';
+    const word = document.getElementById('ascii-word-input').value.trim() || 'FUNKY';
+    buildFontAtlas(' ' + word.toUpperCase()); // leading space keeps brightest pixels blank, matching the other modes
+  } else {
+    wordContainer.style.display = 'none';
+    buildFontAtlas(mode === 1 ? CHARSETS.detailed : CHARSETS.classic);
+  }
+}
+
+document.getElementById('ascii-word-input').addEventListener('input', (e) => {
+  const word = e.target.value.trim() || 'FUNKY';
+  buildFontAtlas(' ' + word.toUpperCase());
+});
 
 function initWebGL(canvas) {
   gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true }); 
@@ -105,31 +165,9 @@ function initWebGL(canvas) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); 
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); 
   
-  // --- NEW: Texture 1: ASCII Font Atlas ---
-  const charSet = " .':-~+=*#%@";
-  const atlasCanvas = document.createElement('canvas');
-  const ctx = atlasCanvas.getContext('2d');
-  atlasCanvas.width = 12 * 64;  // 64px width per char
-  atlasCanvas.height = 64;      // 64px height per char
-  
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, atlasCanvas.width, atlasCanvas.height);
-  ctx.fillStyle = '#fff'; 
-  ctx.font = 'bold 48px monospace'; 
-  ctx.textAlign = 'center';     // Perfectly center the text
-  ctx.textBaseline = 'middle';
-  
-  for(let i = 0; i < charSet.length; i++) {
-    ctx.fillText(charSet[i], i * 64 + 32, 32); 
-  }
-  
+  // Texture 1: ASCII Font Atlas — built from whatever charset/word the user already picked
   fontTexture = gl.createTexture();
-  gl.activeTexture(gl.TEXTURE1); 
-  gl.bindTexture(gl.TEXTURE_2D, fontTexture);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlasCanvas);
-  // Use LINEAR to allow the font to scale cleanly at any font size
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); 
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  // ----------------------------------------
+  buildFontAtlas(currentCharSet);
 
   // FBO setup — explicitly switch back to unit 0 first. Without this, this bind
   // silently lands on unit 1 (still active from the font atlas setup above) and
@@ -174,7 +212,7 @@ function compileActiveFilter() {
   gl.uniform1i(gl.getUniformLocation(activeProgram, 'u_tex'), 0);
   gl.uniform1i(gl.getUniformLocation(activeProgram, 'u_fontTex'), 1);
   gl.uniform1i(gl.getUniformLocation(activeProgram, 'u_prevTex'), 2);
-  stdUniformLocs = { resolution: gl.getUniformLocation(activeProgram, 'u_resolution'), time: gl.getUniformLocation(activeProgram, 'u_time') };
+stdUniformLocs = { resolution: gl.getUniformLocation(activeProgram, 'u_resolution'), time: gl.getUniformLocation(activeProgram, 'u_time'), charCount: gl.getUniformLocation(activeProgram, 'u_charCount') };
   paramLocations = {}; filter.params.forEach(p => paramLocations[p.id] = gl.getUniformLocation(activeProgram, p.id));
 }
 
@@ -205,7 +243,8 @@ function loop() {
   }
 
   if (stdUniformLocs.resolution) gl.uniform2f(stdUniformLocs.resolution, canvas.width, canvas.height);
-  if (stdUniformLocs.time) gl.uniform1f(stdUniformLocs.time, (performance.now() - initTime) / 1000.0);
+ if (stdUniformLocs.time) gl.uniform1f(stdUniformLocs.time, (performance.now() - initTime) / 1000.0);
+  if (stdUniformLocs.charCount) gl.uniform1f(stdUniformLocs.charCount, currentCharCount);
   FILTERS[activeFilterIndex].params.forEach(p => { if (paramLocations[p.id]) gl.uniform1f(paramLocations[p.id], p.currentValue); });
   
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

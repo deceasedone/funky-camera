@@ -70,6 +70,7 @@ export const FILTERS = [
       uniform vec2 u_resolution; 
       uniform float u_fontSize; 
       uniform float u_colorMode; 
+      uniform float u_charCount;
       out vec4 outColor;
       
       void main() {
@@ -88,14 +89,14 @@ export const FILTERS = [
         // 4. Calculate Brightness
         float lum = dot(camColor, vec3(0.299, 0.587, 0.114));
         
-        // 5. Select character based on brightness (0 to 11)
-        float charIndex = floor(lum * 11.99);
+        // 5. Select character based on brightness — scales with however many glyphs are in the current atlas (Classic/Detailed/Word)
+        float charIndex = floor(lum * (u_charCount - 0.01));
         
         // 6. Get coordinates INSIDE the character cell (0.0 to 1.0)
         vec2 localUV = fract(v_uv * grid);
         
         // 7. Sample from the Font Atlas
-        float atlasWidth = 1.0 / 12.0; 
+        float atlasWidth = 1.0 / u_charCount;
         vec2 fontUV = vec2((charIndex + localUV.x) * atlasWidth, localUV.y);
         float fontMask = texture(u_fontTex, fontUV).r;
         
@@ -108,7 +109,8 @@ export const FILTERS = [
       }`,
     params: [
       { id: 'u_fontSize', label: 'Font Size', type: 'range', min: 8, max: 48, step: 2, default: 16 },
-      { id: 'u_colorMode', label: 'Matrix Mode (0) / Color (1)', type: 'range', min: 0, max: 1, step: 1, default: 0 }
+      { id: 'u_colorMode', label: 'Matrix Mode (0) / Color (1)', type: 'range', min: 0, max: 1, step: 1, default: 0 },
+      { id: 'u_charSet', label: 'Charset: Classic(0)/Detailed(1)/Word(2)', type: 'range', min: 0, max: 2, step: 1, default: 0 }
     ]
   },
   {
@@ -267,6 +269,296 @@ export const FILTERS = [
       }`,
     params: [
       { id: 'u_levels', label: 'Color Levels', type: 'range', min: 2, max: 8, step: 1, default: 3 }
+    ]
+  },
+  {
+    name: "19. Oil Paint (Kuwahara)",
+    frag: `#version 300 es
+      precision mediump float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      uniform vec2 u_resolution;
+      uniform float u_radius;
+      out vec4 outColor;
+
+      void main() {
+        vec2 t = 1.0 / u_resolution;
+        int r = max(1, int(u_radius));
+        float n = float((r + 1) * (r + 1));
+
+        // Four overlapping quadrant windows around the current pixel.
+        // They share the centre row/column — that's intentional (classic Kuwahara).
+        vec3 m0 = vec3(0.0), m1 = vec3(0.0), m2 = vec3(0.0), m3 = vec3(0.0);
+        float v0 = 0.0, v1 = 0.0, v2 = 0.0, v3 = 0.0;
+
+        for (int j = -r; j <= 0; j++) {
+          for (int i = -r; i <= 0; i++) { vec3 c = texture(u_tex, v_uv + vec2(float(i), float(j)) * t).rgb; m0 += c; v0 += dot(c, c); }
+          for (int i =  0; i <=  r; i++) { vec3 c = texture(u_tex, v_uv + vec2(float(i), float(j)) * t).rgb; m1 += c; v1 += dot(c, c); }
+        }
+        for (int j = 0; j <= r; j++) {
+          for (int i = -r; i <= 0; i++) { vec3 c = texture(u_tex, v_uv + vec2(float(i), float(j)) * t).rgb; m2 += c; v2 += dot(c, c); }
+          for (int i =  0; i <=  r; i++) { vec3 c = texture(u_tex, v_uv + vec2(float(i), float(j)) * t).rgb; m3 += c; v3 += dot(c, c); }
+        }
+
+        // Variance formula: E[x²] - (E[x])² (applied per channel, summed)
+        m0 /= n; m1 /= n; m2 /= n; m3 /= n;
+        v0 = v0 / n - dot(m0, m0);
+        v1 = v1 / n - dot(m1, m1);
+        v2 = v2 / n - dot(m2, m2);
+        v3 = v3 / n - dot(m3, m3);
+
+        // Pick the quadrant with the most homogeneous neighbourhood
+        vec3 result = m0; float minV = v0;
+        if (v1 < minV) { minV = v1; result = m1; }
+        if (v2 < minV) { minV = v2; result = m2; }
+        if (v3 < minV) {            result = m3; }
+
+        outColor = vec4(result, 1.0);
+      }`,
+    params: [
+      { id: 'u_radius', label: 'Brush Size', type: 'range', min: 1, max: 7, step: 1, default: 3 }
+      // Keep max low on integrated GPUs — radius 7 = 8×8 window × 4 quadrants = 256 samples/pixel
+    ]
+  },
+  {
+    name: "20. CRT Monitor",
+    frag: `#version 300 es
+      precision mediump float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      uniform vec2 u_resolution;
+      uniform float u_curvature;
+      uniform float u_scanlines;
+      out vec4 outColor;
+
+      void main() {
+        // 1. Barrel distortion — curved CRT glass bends the image outward
+        vec2 uv = v_uv * 2.0 - 1.0;
+        uv *= 1.0 + dot(uv, uv) * u_curvature;
+        uv = uv * 0.5 + 0.5;
+
+        // Anything outside the curved screen edge is black bezel
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+          outColor = vec4(0.01, 0.01, 0.01, 1.0);
+          return;
+        }
+
+        // 2. Sample with tiny RGB fringe (barrel distortion is chromatic)
+        float fringe = u_curvature * 0.008;
+        float r = texture(u_tex, vec2(uv.x + fringe, uv.y)).r;
+        float g = texture(u_tex, uv).g;
+        float b = texture(u_tex, vec2(uv.x - fringe, uv.y)).b;
+        vec3 col = vec3(r, g, b);
+
+        // 3. RGB phosphor shadow mask — every 3 horizontal pixels is one R/G/B triad.
+        // Real CRT monitors physically have separate R, G, B phosphor dots per "pixel".
+        float maskX = mod(uv.x * u_resolution.x, 3.0);
+        vec3 mask = vec3(
+          smoothstep(0.0, 0.5, maskX) * (1.0 - smoothstep(0.5, 1.0, maskX)),   // R dot
+          smoothstep(1.0, 1.5, maskX) * (1.0 - smoothstep(1.5, 2.0, maskX)),   // G dot
+          smoothstep(2.0, 2.5, maskX) * (1.0 - smoothstep(2.5, 3.0, maskX))    // B dot
+        );
+        col = col * mix(vec3(1.0), mask * 2.8 + 0.2, 0.25);
+
+        // 4. Horizontal scanlines — the electron beam scans one line at a time
+        float scan = sin(uv.y * u_resolution.y * 3.14159) * 0.5 + 0.5;
+        col *= mix(1.0, scan, u_scanlines);
+
+        // 5. Vignette — the shadow mask darkens the corners
+        float vignette = 1.0 - dot((uv * 2.0 - 1.0) * 0.85, (uv * 2.0 - 1.0) * 0.85);
+        col *= max(vignette, 0.0);
+
+        // 6. Slight green phosphor tint common on old CRTs
+        col.g *= 1.04;
+
+        outColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+      }`,
+    params: [
+      { id: 'u_curvature',  label: 'Screen Curvature', type: 'range', min: 0.0, max: 0.35, step: 0.01, default: 0.12 },
+      { id: 'u_scanlines',  label: 'Scanline Depth',   type: 'range', min: 0.0, max: 0.8,  step: 0.05, default: 0.3  }
+    ]
+  },
+
+  {
+    name: "21. Solarized Print",
+    frag: `#version 300 es
+      precision mediump float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      uniform float u_threshold;
+      uniform float u_amount;
+      out vec4 outColor;
+
+      // Classic darkroom solarization (Sabattier effect): tones past the threshold
+      // start reversing back toward their inverse, producing that surreal halo look.
+      float solarizeChannel(float v, float thresh) {
+        float inv = 1.0 - v;
+        float t = smoothstep(thresh - 0.12, thresh + 0.12, v);
+        return mix(v, inv, t);
+      }
+
+      void main() {
+        vec3 col = texture(u_tex, v_uv).rgb;
+        vec3 sol = vec3(
+          solarizeChannel(col.r, u_threshold),
+          solarizeChannel(col.g, u_threshold),
+          solarizeChannel(col.b, u_threshold)
+        );
+        outColor = vec4(mix(col, sol, u_amount), 1.0);
+      }`,
+    params: [
+      { id: 'u_threshold', label: 'Reversal Point', type: 'range', min: 0.1, max: 0.9, step: 0.05, default: 0.5 },
+      { id: 'u_amount',    label: 'Solarize Mix',   type: 'range', min: 0.0, max: 1.0, step: 0.05, default: 1.0 }
+    ]
+  },
+  {
+    name: "22. Emboss Relief",
+    frag: `#version 300 es
+      precision mediump float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      uniform vec2 u_resolution;
+      uniform float u_time;
+      uniform float u_strength;
+      uniform float u_colorBlend;
+      out vec4 outColor;
+
+      void main() {
+        vec2 t = 1.0 / u_resolution;
+
+        // Light direction rotates over time for a dynamic "turning the clay" look.
+        // u_time drives the rotation; remove + u_time * 0.3 if you want it static.
+        float angle = u_time * 0.3;
+        vec2 light = vec2(cos(angle), sin(angle));
+
+        vec3 above = texture(u_tex, v_uv + light * t).rgb;
+        vec3 below = texture(u_tex, v_uv - light * t).rgb;
+
+        // Difference in the light direction, scaled, then biased to 0.5 neutral grey
+        vec3 emboss = (above - below) * u_strength + 0.5;
+
+        // Convert to greyscale — keeps the stone/clay look
+        float lum = dot(emboss, vec3(0.299, 0.587, 0.114));
+        vec3 grey = vec3(lum);
+
+        // Optional: blend original colour back in for a "tinted relief" effect
+        vec3 original = texture(u_tex, v_uv).rgb;
+        outColor = vec4(mix(grey, original * lum * 1.5, u_colorBlend), 1.0);
+      }`,
+    params: [
+      { id: 'u_strength',   label: 'Relief Depth',  type: 'range', min: 1.0, max: 12.0, step: 0.5, default: 4.0 },
+      { id: 'u_colorBlend', label: 'Colour Tint',   type: 'range', min: 0.0, max: 1.0,  step: 0.05, default: 0.0 }
+    ]
+  },
+  {
+    name: "23. Radial Zoom Blur",
+    frag: `#version 300 es
+      precision mediump float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      uniform vec2 u_resolution;
+      uniform float u_strength;
+      uniform float u_samples;
+      out vec4 outColor;
+
+      void main() {
+        // Direction from this pixel toward the zoom origin (screen centre)
+        vec2 dir    = v_uv - vec2(0.5, 0.5);
+        vec3 colour = vec3(0.0);
+        int  n      = max(1, int(u_samples));
+
+        // Walk from the current pixel back toward centre, averaging samples.
+        // t=0 → the pixel itself, t=1 → the zoom-origin direction fully.
+        for (int i = 0; i < n; i++) {
+          float t = float(i) / float(n);
+          colour += texture(u_tex, v_uv - dir * t * u_strength).rgb;
+        }
+        colour /= float(n);
+
+        // Slight vignette so the centre stays sharp
+        float vig = 1.0 - dot(dir, dir) * 1.2;
+        outColor = vec4(colour * max(vig, 0.5), 1.0);
+      }`,
+    params: [
+      { id: 'u_strength', label: 'Zoom Amount',   type: 'range', min: 0.0, max: 0.5,  step: 0.01, default: 0.15 },
+      { id: 'u_samples',  label: 'Sample Count',  type: 'range', min: 4,   max: 24,   step: 2,    default: 12  }
+    ]
+  },
+  {
+    name: "24. Cross-Hatch Engraving",
+    frag: `#version 300 es
+      precision mediump float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      uniform vec2 u_resolution;
+      uniform float u_lineSpacing;
+      uniform float u_inkAmount;
+      out vec4 outColor;
+
+      float hatchLine(vec2 px, float angleDeg, float spacing) {
+        float angle = radians(angleDeg);
+        vec2 dir = vec2(cos(angle), sin(angle));
+        float coord = dot(px, dir);
+        return step(0.5, fract(coord / spacing));
+      }
+
+      void main() {
+        vec3 col = texture(u_tex, v_uv).rgb;
+        float lum = dot(col, vec3(0.299, 0.587, 0.114)) / max(u_inkAmount, 0.05);
+
+        vec2 px = v_uv * u_resolution;
+        float linesA = hatchLine(px,  45.0, u_lineSpacing);
+        float linesB = hatchLine(px, -45.0, u_lineSpacing);
+        float linesC = hatchLine(px,   0.0, u_lineSpacing);
+
+        // Darker regions accumulate more crossing line directions, like a real engraving plate
+        float ink = 1.0;
+        if (lum < 0.78) ink = min(ink, linesA);
+        if (lum < 0.52) ink = min(ink, linesB);
+        if (lum < 0.26) ink = min(ink, linesC);
+
+        vec3 paper = vec3(0.95, 0.93, 0.86);
+        vec3 inkColor = vec3(0.04, 0.04, 0.05);
+        outColor = vec4(mix(inkColor, paper, ink), 1.0);
+      }`,
+    params: [
+      { id: 'u_lineSpacing', label: 'Line Spacing', type: 'range', min: 3,   max: 18,  step: 1,    default: 7   },
+      { id: 'u_inkAmount',   label: 'Ink Density',  type: 'range', min: 0.3, max: 2.0, step: 0.05, default: 1.0 }
+    ]
+  },
+  {
+    name: "25. Needlepoint Stitch",
+    frag: `#version 300 es
+      precision mediump float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      uniform vec2 u_resolution;
+      uniform float u_cellSize;
+      uniform float u_threadThickness;
+      out vec4 outColor;
+
+      void main() {
+        vec2 grid = u_resolution / u_cellSize;
+        vec2 cell = floor(v_uv * grid);
+        vec2 local = fract(v_uv * grid);
+
+        vec2 centerUV = (cell + 0.5) / grid;
+        vec3 col = texture(u_tex, centerUV).rgb;
+        float lum = dot(col, vec3(0.299, 0.587, 0.114));
+
+        // Distance to each diagonal of the cell — together they form an X-shaped stitch
+        float d1 = abs(local.x - local.y);
+        float d2 = abs(local.x + local.y - 1.0);
+        float thickness = mix(0.05, 0.24, 1.0 - lum) * u_threadThickness;
+        float stitch = step(min(d1, d2), thickness);
+
+        vec3 linen = vec3(0.93, 0.90, 0.82);
+        vec3 thread = col * 1.15;
+        outColor = vec4(mix(linen, thread, stitch), 1.0);
+      }`,
+    params: [
+      { id: 'u_cellSize',        label: 'Stitch Size',      type: 'range', min: 6,   max: 36,  step: 1,    default: 16 },
+      { id: 'u_threadThickness', label: 'Thread Thickness', type: 'range', min: 0.3, max: 2.0, step: 0.05, default: 1.0 }
     ]
   }
 ];
