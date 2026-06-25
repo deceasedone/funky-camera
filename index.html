@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Funky Camera — Phase 1 Complete</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --bg: #080808; --surface: #111; --border: #1c1c1c; --accent: #00f0ff; --text: #ddd; --muted: #666; --font: 'Courier New', monospace; }
+    body { background: var(--bg); color: var(--text); font-family: var(--font); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    
+    .topbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; z-index: 10;}
+    .logo { font-size: 12px; font-weight: bold; letter-spacing: 0.2em; color: var(--accent); }
+    .gl-badge { font-size: 9px; letter-spacing: 0.12em; color: #000; background: var(--accent); padding: 2px 7px; display: none; margin-left: 10px; }
+    .sig { display: flex; align-items: center; gap: 7px; font-size: 10px; letter-spacing: 0.1em; color: var(--muted); }
+    .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); transition: background 0.3s; }
+    .dot.live { background: #22c55e; }
+    
+    .main-content { display: flex; flex: 1; overflow: hidden; }
+    .viewport { flex: 1; background: #030303; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
+    canvas { max-width: 100%; max-height: 100%; display: none; }
+    canvas.mirror { transform: scaleX(-1); }
+    
+    .idle { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+    .idle p { font-size: 11px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+    .start-btn { background: var(--accent); color: #000; border: none; padding: 9px 24px; font-family: var(--font); font-size: 11px; font-weight: bold; letter-spacing: 0.15em; text-transform: uppercase; cursor: pointer; transition: opacity 0.2s; }
+    .start-btn:hover { opacity: 0.85; }
+    
+    .sidebar { width: 300px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px; overflow-y: auto; }
+    .sidebar h3 { font-size: 11px; letter-spacing: 0.15em; color: var(--muted); text-transform: uppercase; margin-bottom: 12px; }
+    
+    .prepass-container { background: var(--bg); border: 1px solid var(--border); padding: 10px; margin-bottom: 24px; display: flex; align-items: center; gap: 10px; font-size: 11px; cursor: pointer;}
+    .prepass-container input { accent-color: var(--accent); cursor: pointer; }
+
+    select.filter-select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 8px; font-family: var(--font); font-size: 11px; outline: none; margin-bottom: 24px; cursor: pointer; }
+    select.filter-select:focus { border-color: var(--accent); }
+    
+    .param-group { margin-bottom: 16px; }
+    .param-header { display: flex; justify-content: space-between; font-size: 10px; color: var(--text); margin-bottom: 6px; letter-spacing: 0.05em; }
+    .param-val { color: var(--accent); }
+    input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+    
+    .bottombar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
+    .stats { display: flex; gap: 20px; font-size: 10px; color: var(--muted); letter-spacing: 0.08em; }
+    .stats b { color: var(--text); font-weight: normal; }
+    .controls { display: flex; gap: 8px; }
+    .ctrl { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 6px 14px; font-family: var(--font); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; transition: all 0.15s; }
+    .ctrl:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .ctrl.highlight { border-color: #22c55e; color: #22c55e; }
+    .ctrl:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    /* Mobile Responsiveness */
+    @media (max-width: 768px) {
+      .main-content { flex-direction: column; }
+      .viewport { flex: 1; min-height: 45vh; }
+      .sidebar { width: 100%; flex: 1; border-left: none; border-top: 1px solid var(--border); padding: 12px; }
+      .bottombar { flex-wrap: wrap; justify-content: center; gap: 8px; padding: 12px; }
+      .stats { width: 100%; justify-content: space-between; margin-bottom: 4px; font-size: 11px; }
+      .controls { width: 100%; display: flex; justify-content: space-between; }
+      .ctrl { flex: 1; padding: 10px 0; font-size: 11px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <div style="display:flex;align-items:center;">
+    <div class="logo">▣ FUNKY CAM</div><span class="gl-badge" id="gl-badge">WebGL2</span>
+  </div>
+  <div class="sig"><div class="dot" id="dot"></div><span id="status-txt">NO SIGNAL</span></div>
+</div>
+
+<div class="main-content">
+  <div class="viewport">
+    <video id="video" autoplay muted playsinline style="display:none"></video>
+    <canvas id="canvas"></canvas>
+    <div class="idle" id="idle">
+      <p>System Ready</p>
+      <button class="start-btn" id="start-btn">Initialise Camera</button>
+    </div>
+  </div>
+  <div class="sidebar">
+    <h3>Webcam Pre-Processing</h3>
+    <label class="prepass-container">
+      <input type="checkbox" id="prepass-toggle" checked>
+      Sharpen & Contrast Enhance
+    </label>
+
+    <h3>Active Filter</h3>
+    <select id="filter-select" class="filter-select"></select>
+    
+    <h3>Parameters</h3>
+    <div id="filter-params-container"></div>
+  </div>
+</div>
+
+<div class="bottombar">
+  <div class="stats"><span>RES <b id="s-res">—</b></span><span>FPS <b id="s-fps">—</b></span></div>
+  <div class="controls">
+    <button class="ctrl highlight" id="capture-btn" disabled>📸 Capture</button>
+    <button class="ctrl" id="flip-btn" disabled>Flip</button>
+    <button class="ctrl" id="stop-btn" disabled>Stop</button>
+  </div>
+</div>
+
+<!-- Load our Engine as a Module -->
+<script type="module" src="engine.js"></script>
+
+</body>
+</html>
